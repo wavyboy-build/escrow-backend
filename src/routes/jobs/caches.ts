@@ -1,8 +1,14 @@
+import { createHash } from "node:crypto";
 import NodeCache from "node-cache";
 import { config } from "../../config.js";
+import { safeCacheSet } from "../../utils/cache.js";
 
 export const WHITELIST_TTL = config.whitelistCacheTtlS;
-export const whitelistCache = new NodeCache({ stdTTL: WHITELIST_TTL, useClones: false });
+export const whitelistCache = new NodeCache({
+  stdTTL: WHITELIST_TTL,
+  useClones: false,
+  maxKeys: config.cacheMaxKeys,
+});
 export const inFlightWhitelistRequests = new Map<string, Promise<string[]>>();
 export function resetWhitelistCache(): void {
   whitelistCache.flushAll();
@@ -26,6 +32,7 @@ export const CLAIM_AUTO_RELEASE_TTL = config.claimAutoReleaseCacheTtlS;
 export const claimAutoReleaseCache = new NodeCache({
   stdTTL: CLAIM_AUTO_RELEASE_TTL,
   useClones: false,
+  maxKeys: config.cacheMaxKeys,
 });
 export const inFlightClaimAutoReleaseRequests = new Map<string, Promise<BuildTxPayload>>();
 export function resetClaimAutoReleaseCache(): void {
@@ -37,6 +44,7 @@ export const SUBMIT_CACHE_TTL = config.submitCacheTtlS;
 export const submitCache = new NodeCache({
   stdTTL: SUBMIT_CACHE_TTL,
   useClones: false,
+  maxKeys: config.cacheMaxKeys,
 });
 export const inFlightSubmitRequests = new Map<string, Promise<unknown>>();
 export function resetSubmitCache(): void {
@@ -44,11 +52,21 @@ export function resetSubmitCache(): void {
   inFlightSubmitRequests.clear();
 }
 
+/**
+ * Cache key for a signed transaction. The signed XDR is 1–2 kB, so keying the
+ * cache on it directly wastes memory; the SHA-256 digest is a fixed 64 chars
+ * while still collapsing identical submissions to one entry (#1043).
+ */
+export function submitCacheKey(signedXdr: string): string {
+  return createHash("sha256").update(signedXdr).digest("hex");
+}
+
 /** Terminal transaction states (SUCCESS / FAILED) never change (#865). */
 export const TX_STATUS_CACHE_TTL = 60;
 export const txStatusCache = new NodeCache({
   stdTTL: TX_STATUS_CACHE_TTL,
   useClones: false,
+  maxKeys: config.cacheMaxKeys,
 });
 export function resetTxStatusCache(): void {
   txStatusCache.flushAll();
@@ -58,6 +76,7 @@ export const BUILD_TX_CACHE_TTL = config.buildTxCacheTtlS;
 export const buildTxCache = new NodeCache({
   stdTTL: BUILD_TX_CACHE_TTL,
   useClones: false,
+  maxKeys: config.cacheMaxKeys,
 });
 export const inFlightBuildTxRequests = new Map<string, Promise<BuildTxPayload>>();
 export function resetBuildTxCache(): void {
@@ -77,6 +96,7 @@ export const TIME_REMAINING_CACHE_TTL = config.timeRemainingCacheTtlS;
 export const timeRemainingCache = new NodeCache({
   stdTTL: TIME_REMAINING_CACHE_TTL,
   useClones: false,
+  maxKeys: config.cacheMaxKeys,
 });
 export const inFlightTimeRemainingRequests = new Map<string, Promise<number>>();
 export function resetTimeRemainingCache(): void {
@@ -88,6 +108,7 @@ export const PARTIAL_RELEASE_CACHE_TTL = config.partialReleaseCacheTtlS;
 export const partialReleaseCache = new NodeCache({
   stdTTL: PARTIAL_RELEASE_CACHE_TTL,
   useClones: false,
+  maxKeys: config.cacheMaxKeys,
 });
 export const inFlightPartialReleaseRequests = new Map<string, Promise<BuildTxPayload>>();
 export function resetPartialReleaseCache(): void {
@@ -103,6 +124,7 @@ export const FEE_PREVIEW_CACHE_TTL = config.feePreviewCacheTtlS;
 export const feePreviewCache = new NodeCache({
   stdTTL: FEE_PREVIEW_CACHE_TTL,
   useClones: false,
+  maxKeys: config.cacheMaxKeys,
 });
 export const inFlightFeePreviewRequests = new Map<string, Promise<unknown>>();
 export function resetFeePreviewCache(): void {
@@ -225,5 +247,5 @@ export function setCachedBuildTx(
   );
   const ttl = Math.min(ttlSeconds, servableFor);
   if (ttl <= 0) return;
-  cache.set<CachedUnsignedXdr>(key, payload, ttl);
+  safeCacheSet<CachedUnsignedXdr>(cache, key, payload, ttl);
 }

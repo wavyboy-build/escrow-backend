@@ -17,9 +17,11 @@ import { rejectedRequestLogMeta, xdrLogMeta } from "../../utils/log-redaction.js
 
 import {
   submitCache,
+  submitCacheKey,
   inFlightSubmitRequests,
 } from "./caches.js";
 import { cachedSingleFlight } from "./dedupe.js";
+import { safeCacheSet } from "../../utils/cache.js";
 import {
   classifySubmitError,
 } from "./errors.js";
@@ -28,7 +30,8 @@ const router = Router();
 
 // ---------------------------------------------------------------------------
 // POST /api/jobs/submit – submit a signed transaction
-// Caches results by signedXdr to deduplicate concurrent identical submissions.
+// Caches results by the transaction hash so identical submissions deduplicate
+// without storing the 1–2 kB signed XDR as a cache key (#1043).
 // ---------------------------------------------------------------------------
 
 router.post(
@@ -45,7 +48,6 @@ router.post(
   ),
   async (req: Request, res: Response) => {
     const { signedXdr, sourceAddress } = req.body as { signedXdr: string; sourceAddress?: string };
-    const cacheKey = signedXdr;
     // Reuse the request id (#773); a fresh one when mounted without it.
     const traceId = req.id ?? randomUUID();
 
@@ -56,6 +58,7 @@ router.post(
     });
 
     try {
+      const cacheKey = submitCacheKey(signedXdr);
       const sourceRef = { current: "rpc" as "cache" | "in-flight" | "rpc" };
       const result = await cachedSingleFlight<unknown>({
         cache: submitCache,
@@ -81,7 +84,7 @@ router.post(
           // (#614).
           const txStatus = (resTx as { status?: string })?.status;
           if (txStatus === "PENDING" || txStatus === "DUPLICATE") {
-            submitCache.set(cacheKey, resTx);
+            safeCacheSet(submitCache, cacheKey, resTx);
           }
           return resTx;
         },

@@ -43,6 +43,7 @@ import {
   adjustIndexerRunnerPollInterval,
 } from "./indexer_runner.js";
 import { deliverWebhooks, pruneWebhookDeliveries } from "./webhook-delivery.js";
+import { enqueueEmailNotifications } from "./email-delivery.js";
 import { buildGetEventsRequest } from "./event_type_filter.js";
 import { invalidateJobStateForEvents } from "./job-state-cache.js";
 import { invalidateContractCaches } from "../routes/jobs/caches.js";
@@ -51,6 +52,7 @@ import { config } from "../config.js";
 import { rpcAllowHttp } from "../utils/rpc-allow-http.js";
 import logger from "../utils/logger.js";
 import { captureError } from "../utils/error-reporting.js";
+import { sendOpsAlert } from "../utils/ops-alerts.js";
 import { stringifyWithBigInt } from "../utils/safe-json.js";
 
 const RPC_URL =
@@ -929,6 +931,15 @@ export async function pollEvents(): Promise<boolean> {
         stallThresholdMs,
         consecutiveFailures: failureMonitor.getConsecutiveFailures(),
       });
+      sendOpsAlert({
+        severity: "critical",
+        title: "Poller stall detected",
+        details: {
+          elapsedMs: elapsedMsSinceLastSuccess,
+          stallThresholdMs,
+          consecutiveFailures: failureMonitor.getConsecutiveFailures(),
+        },
+      });
     }
   }
 
@@ -1067,6 +1078,15 @@ export async function pollEvents(): Promise<boolean> {
             if (oldest - 1 >= pageStart) {
               recordSkippedLedgerRange(pageStart, oldest - 1);
             }
+            sendOpsAlert({
+              severity: "warning",
+              title: "Ledger range skipped outside RPC retention window",
+              details: {
+                skippedFrom: pageStart,
+                skippedTo: oldest - 1,
+                resumedAt: oldest,
+              },
+            });
             startLedger = oldest;
             minStartLedger = Math.min(minStartLedger, startLedger);
             return await rpcClient.getEvents(
@@ -1244,9 +1264,17 @@ export async function pollEvents(): Promise<boolean> {
             delivery.endLedger,
             delivery.contractIds,
           );
+          // Email notifications run on their own queue (#1044) so a slow SMTP
+          // server never blocks indexing or webhook delivery.
+          void enqueueEmailNotifications(
+            delivery.startLedger,
+            delivery.endLedger,
+            delivery.contractIds,
+          );
         }
       } else if (Number.isFinite(minStartLedger)) {
         void enqueueWebhookDelivery(minStartLedger, currentLedger);
+        void enqueueEmailNotifications(minStartLedger, currentLedger);
       }
     }
 
@@ -1283,6 +1311,15 @@ export async function pollEvents(): Promise<boolean> {
         consecutiveFailures: failureMonitor.getConsecutiveFailures(),
         threshold: failureMonitor.getFailureThreshold(),
         lastSuccessAt: failureMonitor.getLastSuccessfulAt(),
+      });
+      sendOpsAlert({
+        severity: "critical",
+        title: "Poller alert: consecutive failure threshold exceeded",
+        details: {
+          consecutiveFailures: failureMonitor.getConsecutiveFailures(),
+          threshold: failureMonitor.getFailureThreshold(),
+          lastSuccessAt: failureMonitor.getLastSuccessfulAt(),
+        },
       });
       captureError(err, {
         tags: {

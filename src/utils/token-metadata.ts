@@ -29,6 +29,8 @@ import {
 import { Server } from "@stellar/stellar-sdk/rpc";
 import NodeCache from "node-cache";
 import logger from "./logger.js";
+import { config } from "../config.js";
+import { safeCacheSet } from "./cache.js";
 import { rpcAllowHttp } from "./rpc-allow-http.js";
 
 /** Metadata resolved for a token contract. */
@@ -195,12 +197,14 @@ const metadataCache = new NodeCache({
   stdTTL: CACHE_TTL_SECONDS,
   checkperiod: 600,
   useClones: false,
+  maxKeys: config.cacheMaxKeys,
 });
 
 const failureCache = new NodeCache({
   stdTTL: FAILURE_CACHE_TTL_SECONDS,
   checkperiod: 60,
   useClones: false,
+  maxKeys: config.cacheMaxKeys,
 });
 
 /** Drop every cached token metadata entry (tests / manual refresh). */
@@ -323,7 +327,7 @@ export async function resolveTokenMetadata(
         ? decimalsResult.reason.message
         : String(decimalsResult.reason);
     const message = `failed to resolve token decimals for ${address}: ${reason}`;
-    failureCache.set(address, message);
+    safeCacheSet(failureCache, address, message);
     throw new TokenMetadataError(message);
   }
 
@@ -342,7 +346,7 @@ export async function resolveTokenMetadata(
     name: name || getTokenLabel(symbol),
   };
 
-  metadataCache.set(address, metadata);
+  safeCacheSet(metadataCache, address, metadata);
   return metadata;
 }
 

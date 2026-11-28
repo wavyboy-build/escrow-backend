@@ -15,10 +15,12 @@ import {
   getActiveSubscriptions,
   getActiveContractIds,
   type WebhookSubscription,
+  type WebhookSubscriptionFilters,
 } from "../indexer/db.js";
 import { deliverWebhooks } from "../indexer/webhook-delivery.js";
 import { isValidStellarContractId } from "./stellar.js";
 import { EVENT_TYPES } from "../indexer/event_type_filter.js";
+import { webhookFiltersSchema } from "../schemas/webhooks.js";
 import logger from "./logger.js";
 import { validateWebhookUrl } from "./webhook-url-guard.js";
 
@@ -29,6 +31,8 @@ export type SubscribeInput = {
   contract_id: string;
   webhook_url: string;
   event_types?: string[] | "*";
+  /** Optional granular delivery filters (#1041), validated with Zod here. */
+  filters?: unknown;
 };
 
 export type UnsubscribeInput = {
@@ -196,6 +200,27 @@ export function dispatchSubscribe(
     return { ok: false, status: 400, error: normalized.error, traceId };
   }
 
+  // Granular filters are optional; when present they must be a well-formed
+  // object (#1041). An empty object carries no constraints.
+  let filters: WebhookSubscriptionFilters | null = null;
+  if (input.filters !== undefined && input.filters !== null) {
+    const parsedFilters = webhookFiltersSchema.safeParse(input.filters);
+    if (!parsedFilters.success) {
+      const error = `Invalid filters: ${parsedFilters.error.errors
+        .map((issue) => issue.message)
+        .join("; ")}`;
+      logger.debug("webhook_dispatcher subscribe response sent", {
+        traceId,
+        route,
+        status: 400,
+        success: false,
+        error,
+      });
+      return { ok: false, status: 400, error, traceId };
+    }
+    filters = Object.keys(parsedFilters.data).length > 0 ? parsedFilters.data : null;
+  }
+
   try {
     // A contract that isn't monitored can never receive deliveries, so
     // subscribing to it is rejected with 404 rather than silently storing a
@@ -216,7 +241,8 @@ export function dispatchSubscribe(
     const subscription = addSubscription(
       input.contract_id,
       input.webhook_url,
-      normalized.types
+      normalized.types,
+      filters
     );
 
     logger.info("webhook_dispatcher subscription created", {

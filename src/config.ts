@@ -223,6 +223,59 @@ export const config = {
   get webhookMaxDeliveryAttempts(): number {
     return readIntEnv("WEBHOOK_MAX_DELIVERY_ATTEMPTS", 25, 1);
   },
+
+  // Operator alerting (#1042). Empty URL disables alerting entirely.
+  get opsAlertWebhookUrl(): string {
+    return (process.env.OPS_ALERT_WEBHOOK_URL || "").trim();
+  },
+  get opsAlertMinIntervalS(): number {
+    return readIntEnv("OPS_ALERT_MIN_INTERVAL_S", 900, 0);
+  },
+
+  // Upper bound on every in-memory NodeCache (#1043). Without `maxKeys`
+  // node-cache grows without limit; a burst of attacker-controlled cache keys
+  // (build-tx, fee-preview, wallet lookups) can OOM the 512 MB container.
+  // Sized to normal working sets; overflow is treated as a cache miss.
+  get cacheMaxKeys(): number {
+    return readIntEnv("CACHE_MAX_KEYS", 5000, 1);
+  },
+
+  // Per-contract email notifications (#1044). An unset/empty SMTP_URL disables
+  // the feature entirely: the endpoints reply 503 and no delivery is attempted.
+  get smtpUrl(): string {
+    return (process.env.SMTP_URL || "").trim();
+  },
+  get emailFrom(): string {
+    return (process.env.EMAIL_FROM || "no-reply@milesto.local").trim();
+  },
+  /**
+   * Absolute base URL used to build one-click confirmation / unsubscribe links.
+   * Must be reachable by the recipient (i.e. the public frontend origin).
+   */
+  get emailPublicBaseUrl(): string {
+    return (process.env.EMAIL_PUBLIC_BASE_URL || "http://localhost:3000")
+      .trim()
+      .replace(/\/+$/, "");
+  },
+  get emailRateLimitWindowMs(): number {
+    return readIntEnv("EMAIL_RATE_LIMIT_WINDOW_MS", 3600000, 1);
+  },
+  /** Max subscribe requests per source IP per window. */
+  get emailRateLimitMaxPerIp(): number {
+    return readIntEnv("EMAIL_RATE_LIMIT_MAX_PER_IP", 5, 1);
+  },
+  /** Max subscribe requests per recipient address per window. */
+  get emailRateLimitMaxPerEmail(): number {
+    return readIntEnv("EMAIL_RATE_LIMIT_MAX_PER_EMAIL", 3, 1);
+  },
+  /** Max active/pending subscriptions a single email address may hold. */
+  get emailMaxSubscriptionsPerEmail(): number {
+    return readIntEnv("EMAIL_MAX_SUBSCRIPTIONS_PER_EMAIL", 20, 1);
+  },
+  /** Bound on the in-memory email delivery queue; overflow is dropped, logged. */
+  get emailDeliveryQueueMax(): number {
+    return readIntEnv("EMAIL_DELIVERY_QUEUE_MAX", 1000, 1);
+  },
 } as const;
 
 /**

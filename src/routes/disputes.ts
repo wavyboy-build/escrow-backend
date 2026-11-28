@@ -7,6 +7,8 @@ import {
   scValToNative,
 } from "@stellar/stellar-sdk";
 import NodeCache from "node-cache";
+import { config } from "../config.js";
+import { safeCacheSet } from "../utils/cache.js";
 import {
   jobContractSecurityHeaders,
 } from "../middleware/job-contract-security.js";
@@ -32,6 +34,7 @@ const router = Router();
 export const disputeStateCache = new NodeCache({
   stdTTL: JOB_STATE_CACHE_TTL_S,
   useClones: false,
+  maxKeys: config.cacheMaxKeys,
 });
 
 const inFlightDisputeRequests = new Map<string, Promise<unknown>>();
@@ -278,7 +281,7 @@ router.get(
       };
 
       if (disputeData !== null && JOB_STATE_CACHE_TTL_S > 0) {
-        disputeStateCache.set(rawDisputeId, responsePayload);
+        safeCacheSet(disputeStateCache, rawDisputeId, responsePayload);
       }
 
       logger.info("Dispute fetched successfully", {

@@ -30,6 +30,7 @@ import { whitelistCache ,
   UNSIGNED_TX_TIMEOUT_S,
 } from "./caches.js";
 import { formatError } from "../../utils/format-error.js";
+import { safeCacheSet } from "../../utils/cache.js";
 
 /** True when `contractId` is the configured escrow factory. */
 function isFactory(contractId: string): boolean {
@@ -109,7 +110,7 @@ router.get(
           const errorMsg = String(result.error);
           // Contract not initialized: return empty token list
           if (errorMsg.includes("contract error #2") || errorMsg.includes("NotInitialized")) {
-            whitelistCache.set(contractId, []);
+            safeCacheSet(whitelistCache, contractId, []);
             logger.info("Whitelisted tokens fetched successfully", { contractId, tokenCount: 0 });
             return [];
           }
@@ -128,7 +129,7 @@ router.get(
             throw new Error("unexpected retval shape");
           }
           const tokens: string[] = decoded;
-          whitelistCache.set(contractId, tokens);
+          safeCacheSet(whitelistCache, contractId, tokens);
           logger.info("Whitelisted tokens fetched successfully", { contractId, tokenCount: tokens.length });
           return tokens;
         }

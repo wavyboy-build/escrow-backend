@@ -16,6 +16,7 @@ import { handleUncaughtException, registerShutdownHandlers } from "./shutdown.js
 import { formatError } from "./utils/format-error.js";
 import logger from "./utils/logger.js";
 import { captureError, initErrorReporting } from "./utils/error-reporting.js";
+import { sendOpsAlert } from "./utils/ops-alerts.js";
 
 // Unhandled rejections are logged and the process keeps running (#689); the
 // poll loop records its own failures. An uncaught exception leaves the process
@@ -81,6 +82,11 @@ export async function main(deps: StartupDeps = {}): Promise<void> {
   } catch (err) {
     logger.error("Startup network check failed – shutting down", {
       error: err instanceof Error ? err.message : String(err),
+    });
+    sendOpsAlert({
+      severity: "critical",
+      title: "Startup network check failed",
+      details: { error: err instanceof Error ? err.message : String(err) },
     });
     (deps.exit ?? process.exit)(1);
     return;

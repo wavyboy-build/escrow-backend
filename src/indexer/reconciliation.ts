@@ -23,6 +23,7 @@ import {
 import { getDb } from "./db.js";
 import { sumLedgerAmounts } from "../utils/audit_ledger_sum_checker.js";
 import logger from "../utils/logger.js";
+import { sendOpsAlert } from "../utils/ops-alerts.js";
 import { config } from "../config.js";
 import { simulationSource, NETWORK_PASSPHRASE } from "../utils/soroban-call.js";
 import { getActiveServer } from "./poller.js";
@@ -268,6 +269,16 @@ export async function reconcileContract(
     persist(result);
     if (result.status === "mismatch") {
       logger.warn("Reconciliation mismatch", { contractId, expected: base.expected_balance, onchain: result.onchain_balance, delta: result.delta });
+      sendOpsAlert({
+        severity: "warning",
+        title: "Reconciliation mismatch",
+        details: {
+          contractId,
+          expected: base.expected_balance,
+          onchain: result.onchain_balance,
+          delta: result.delta,
+        },
+      });
     }
     return result;
   } catch (err) {

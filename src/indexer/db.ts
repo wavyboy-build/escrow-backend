@@ -1,9 +1,12 @@
 import Database from "better-sqlite3";
+import { randomBytes } from "crypto";
 import path from "path";
 import { fileURLToPath } from "url";
 import fs from "fs";
 import NodeCache from "node-cache";
 import logger from "../utils/logger.js";
+import { config } from "../config.js";
+import { safeCacheSet } from "../utils/cache.js";
 import {
   getSqliteSchemaManagerFailureMonitor,
 } from "./sqlite_schema_manager.js";
@@ -128,6 +131,7 @@ const JOBS_BY_WALLET_CACHE_TTL_S = parseInt(
 const jobsByWalletCache = new NodeCache({
   stdTTL: JOBS_BY_WALLET_CACHE_TTL_S,
   useClones: false,
+  maxKeys: config.cacheMaxKeys,
 });
 const inFlightJobsByWalletRequests = new Map<string, Promise<PaginatedJobs>>();
 
@@ -712,6 +716,58 @@ const MIGRATIONS: Migration[] = [
       `);
       backfillJobSummary(database);
     },
+  },
+  {
+    version: 25,
+    description: "add filters_json column to webhook_subscriptions (#1041)",
+    // Granular per-subscription delivery filters (`milestone_index`, `party`).
+    // webhook_subscriptions is created by the bootstrap block in
+    // runMigrations(), not by a migration, so guard on the existing columns
+    // and add only what is missing.
+    up: (database) => {
+      const columns = new Set(
+        (
+          database.prepare("PRAGMA table_info(webhook_subscriptions)").all() as {
+            name: string;
+          }[]
+        ).map((c) => c.name),
+      );
+      if (!columns.has("filters_json")) {
+        database.exec("ALTER TABLE webhook_subscriptions ADD COLUMN filters_json TEXT");
+      }
+    },
+  },
+  {
+    version: 26,
+    description: "create email_subscriptions table (#1044)",
+    // Unauthenticated, per-contract email notifications with double opt-in.
+    // A row starts unconfirmed; the confirmation token flips `confirmed` and
+    // the unsubscribe token deletes the row in one click. `event_types` holds a
+    // JSON array of the public notification labels (or ["*"]).
+    up: `
+      CREATE TABLE IF NOT EXISTS email_subscriptions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        contract_id TEXT NOT NULL,
+        email TEXT NOT NULL,
+        event_types TEXT NOT NULL DEFAULT '*',
+        confirmed INTEGER NOT NULL DEFAULT 0,
+        confirmation_token TEXT NOT NULL UNIQUE,
+        unsubscribe_token TEXT NOT NULL UNIQUE,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        confirmed_at DATETIME,
+        unsubscribed_at DATETIME,
+        UNIQUE(contract_id, email)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_email_subscriptions_contract
+        ON email_subscriptions (contract_id);
+
+      CREATE INDEX IF NOT EXISTS idx_email_subscriptions_email
+        ON email_subscriptions (email);
+
+      CREATE INDEX IF NOT EXISTS idx_email_subscriptions_confirmed
+        ON email_subscriptions (confirmed);
+    `,
   },
 ];
 
@@ -2434,7 +2490,7 @@ export async function getJobsByWallet(
     });
 
     const result = { jobs, total, page: safePage, limit: safeLimit };
-    jobsByWalletCache.set(cacheKey, result);
+    safeCacheSet(jobsByWalletCache, cacheKey, result);
     return result;
   })();
 
@@ -2824,12 +2880,26 @@ export interface IndexerStatusData {
   undecodableEvents: number;
 }
 
+/**
+ * Granular per-subscription delivery filters (#1041). Mirrors the Zod schema
+ * in `src/schemas/webhooks.ts`; stored as JSON in `filters_json`.
+ */
+export interface WebhookSubscriptionFilters {
+  milestone_index?: number[];
+  party?: string;
+}
+
 export interface WebhookSubscription {
   id: number;
   contract_id: string;
   webhook_url: string;
   event_types: string;
   created_at: string;
+  /**
+   * JSON-serialized granular delivery filters (#1041), or null when the
+   * subscription carries no `milestone_index` / `party` filter.
+   */
+  filters_json: string | null;
   /**
    * Number of consecutive failed deliveries (#701). Reset to 0 after a
    * successful delivery and when the subscription is (re-)created.
@@ -2852,27 +2922,30 @@ export interface WebhookSubscription {
 export function addSubscription(
   contractId: string,
   webhookUrl: string,
-  eventTypes: string[]
+  eventTypes: string[],
+  filters: WebhookSubscriptionFilters | null = null
 ): WebhookSubscription {
   const db = getDb();
+  const filtersJson = filters ? JSON.stringify(filters) : null;
 
   const addTx = db.transaction(() => {
     const stmt = db.prepare(`
       INSERT OR IGNORE INTO webhook_subscriptions
-      (contract_id, webhook_url, event_types)
-      VALUES (?, ?, ?)
+      (contract_id, webhook_url, event_types, filters_json)
+      VALUES (?, ?, ?, ?)
     `);
-    stmt.run(contractId, webhookUrl, JSON.stringify(eventTypes));
+    stmt.run(contractId, webhookUrl, JSON.stringify(eventTypes), filtersJson);
 
     // A fresh subscribe re-enables the subscription and clears the failure
-    // history (#701).
+    // history (#701). The filters are refreshed to the latest request too.
     db.prepare(
       `UPDATE webhook_subscriptions
        SET consecutive_failures = 0,
            disabled_at = NULL,
-           last_error = NULL
+           last_error = NULL,
+           filters_json = ?
        WHERE contract_id = ? AND webhook_url = ?`
-    ).run(contractId, webhookUrl);
+    ).run(filtersJson, contractId, webhookUrl);
 
     return db
       .prepare("SELECT * FROM webhook_subscriptions WHERE contract_id = ? AND webhook_url = ?")
@@ -3026,6 +3099,150 @@ export function getSubscriptionsForContract(contractId: string): WebhookSubscrip
   return db
     .prepare("SELECT * FROM webhook_subscriptions WHERE contract_id = ?")
     .all(contractId) as WebhookSubscription[];
+}
+
+// ---------------------------------------------------------------------------
+// Per-contract email subscriptions (#1044)
+// ---------------------------------------------------------------------------
+
+/** A double-opt-in email subscription row. `confirmed === 1` means active. */
+export interface EmailSubscription {
+  id: number;
+  contract_id: string;
+  email: string;
+  /** JSON array of public notification labels, or ["*"]. */
+  event_types: string;
+  confirmed: number;
+  confirmation_token: string;
+  unsubscribe_token: string;
+  created_at: string;
+  confirmed_at: string | null;
+  unsubscribed_at: string | null;
+}
+
+/** 256 bits of entropy, hex-encoded — the confirmation / unsubscribe tokens. */
+function newEmailToken(): string {
+  return randomBytes(32).toString("hex");
+}
+
+/**
+ * Create or refresh a *pending* email subscription for a (contract, email)
+ * pair. Re-subscribing resets the row to unconfirmed and issues fresh tokens,
+ * so an old (possibly leaked) confirmation link cannot confirm a new request.
+ */
+export function upsertEmailSubscription(
+  contractId: string,
+  email: string,
+  eventTypes: string[],
+): EmailSubscription {
+  const db = getDb();
+  const eventTypesJson = JSON.stringify(eventTypes);
+  const confirmationToken = newEmailToken();
+  const unsubscribeToken = newEmailToken();
+
+  const tx = db.transaction(() => {
+    db.prepare(
+      `INSERT INTO email_subscriptions
+         (contract_id, email, event_types, confirmed, confirmation_token, unsubscribe_token)
+       VALUES (?, ?, ?, 0, ?, ?)
+       ON CONFLICT(contract_id, email) DO UPDATE SET
+         event_types = excluded.event_types,
+         confirmed = 0,
+         confirmation_token = excluded.confirmation_token,
+         unsubscribe_token = excluded.unsubscribe_token,
+         confirmed_at = NULL,
+         unsubscribed_at = NULL`,
+    ).run(contractId, email, eventTypesJson, confirmationToken, unsubscribeToken);
+
+    return db
+      .prepare("SELECT * FROM email_subscriptions WHERE contract_id = ? AND email = ?")
+      .get(contractId, email) as EmailSubscription;
+  });
+
+  return tx();
+}
+
+export function getEmailSubscriptionByConfirmationToken(
+  token: string,
+): EmailSubscription | undefined {
+  return getDb()
+    .prepare("SELECT * FROM email_subscriptions WHERE confirmation_token = ?")
+    .get(token) as EmailSubscription | undefined;
+}
+
+/**
+ * Confirm a pending subscription. Returns the now-active row, or undefined
+ * when the token matches nothing. Idempotent: confirming twice is a no-op.
+ */
+export function confirmEmailSubscription(
+  token: string,
+): EmailSubscription | undefined {
+  const db = getDb();
+
+  const tx = db.transaction(() => {
+    const row = db
+      .prepare("SELECT * FROM email_subscriptions WHERE confirmation_token = ?")
+      .get(token) as EmailSubscription | undefined;
+    if (!row) return undefined;
+
+    db.prepare(
+      `UPDATE email_subscriptions
+         SET confirmed = 1,
+             confirmed_at = COALESCE(confirmed_at, CURRENT_TIMESTAMP)
+       WHERE id = ?`,
+    ).run(row.id);
+
+    return db
+      .prepare("SELECT * FROM email_subscriptions WHERE id = ?")
+      .get(row.id) as EmailSubscription;
+  });
+
+  return tx();
+}
+
+/** One-click unsubscribe: delete the row matching the token. */
+export function removeEmailSubscriptionByUnsubscribeToken(token: string): boolean {
+  const result = getDb()
+    .prepare("DELETE FROM email_subscriptions WHERE unsubscribe_token = ?")
+    .run(token);
+  return result.changes > 0;
+}
+
+/** Active + pending subscriptions held by one email address (cap enforcement). */
+export function countEmailSubscriptionsForEmail(email: string): number {
+  const row = getDb()
+    .prepare("SELECT COUNT(*) as count FROM email_subscriptions WHERE email = ?")
+    .get(email) as { count: number };
+  return row.count;
+}
+
+/** True when this (contract, email) pair already has a row, confirmed or not. */
+export function hasEmailSubscription(contractId: string, email: string): boolean {
+  return (
+    getDb()
+      .prepare(
+        "SELECT 1 FROM email_subscriptions WHERE contract_id = ? AND email = ?",
+      )
+      .get(contractId, email) !== undefined
+  );
+}
+
+/** Confirmed subscriptions for a single contract. */
+export function getConfirmedEmailSubscriptionsForContract(
+  contractId: string,
+): EmailSubscription[] {
+  return getDb()
+    .prepare(
+      "SELECT * FROM email_subscriptions WHERE contract_id = ? AND confirmed = 1",
+    )
+    .all(contractId) as EmailSubscription[];
+}
+
+/** Every confirmed subscription, across all contracts (delivery loop source). */
+export function getConfirmedEmailSubscriptions(): EmailSubscription[] {
+  return getDb()
+    .prepare("SELECT * FROM email_subscriptions WHERE confirmed = 1")
+    .all() as EmailSubscription[];
 }
 
 export function getIndexerStatusData(): IndexerStatusData {

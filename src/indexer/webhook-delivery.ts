@@ -5,8 +5,11 @@ import {
   recordSubscriptionFailure,
   recordSubscriptionSuccess,
   EventDbRow,
+  type WebhookSubscription,
+  type WebhookSubscriptionFilters,
 } from "./db.js";
 import logger from "../utils/logger.js";
+import { sendOpsAlert } from "../utils/ops-alerts.js";
 import {
   assertDeliveryTargetAllowed,
   createPinnedDispatcher,
@@ -723,10 +726,7 @@ function recordResult(result: DeliveryResult): void {
   );
 }
 
-function subscriptionsMatchEvent(
-  eventTypes: string,
-  eventType: string
-): boolean {
+function eventTypesMatch(eventTypes: string, eventType: string): boolean {
   if (eventTypes === "*") return true;
   try {
     const types = JSON.parse(eventTypes) as string[];
@@ -734,6 +734,83 @@ function subscriptionsMatchEvent(
   } catch {
     return eventTypes === eventType;
   }
+}
+
+/** Roles whose decoded value a `party` filter matches against (#1041). */
+const PARTY_ROLES = ["client", "freelancer", "arbiter", "caller"] as const;
+
+/** Parse a stored `filters_json` value, tolerating null/malformed rows. */
+function parseSubscriptionFilters(
+  filtersJson: string | null | undefined,
+): WebhookSubscriptionFilters | null {
+  if (!filtersJson) return null;
+  try {
+    const parsed = JSON.parse(filtersJson) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as WebhookSubscriptionFilters;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** Decode an event's `data_json` payload, returning null when it is unusable. */
+function decodeEventData(event: EventDbRow): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(event.data_json) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether a subscription should receive an event.
+ *
+ * `event_types` is matched first (wildcards and JSON arrays as before). When
+ * the subscription carries `filters_json`, every configured key must be
+ * satisfied by the event's decoded payload; a configured key whose field is
+ * absent from the payload is a non-match (#1041). A subscription without
+ * filters keeps its original behaviour exactly.
+ */
+export function subscriptionsMatchEvent(
+  subscription: Pick<WebhookSubscription, "event_types" | "filters_json">,
+  event: Pick<EventDbRow, "event_type" | "data_json">,
+): boolean {
+  if (!eventTypesMatch(subscription.event_types, event.event_type)) {
+    return false;
+  }
+
+  const filters = parseSubscriptionFilters(subscription.filters_json);
+  if (!filters) return true;
+
+  const data = decodeEventData(event as EventDbRow);
+
+  if (filters.milestone_index !== undefined) {
+    const raw = data?.milestone_index;
+    const index =
+      typeof raw === "number"
+        ? raw
+        : typeof raw === "string" && raw.trim() !== ""
+          ? Number(raw)
+          : NaN;
+    if (!Number.isInteger(index) || !filters.milestone_index.includes(index)) {
+      return false;
+    }
+  }
+
+  if (filters.party !== undefined) {
+    const matched = data
+      ? PARTY_ROLES.some((role) => data[role] === filters.party)
+      : false;
+    if (!matched) return false;
+  }
+
+  return true;
 }
 
 export async function deliverWebhooks(
@@ -814,7 +891,7 @@ export async function deliverWebhooks(
 
     for (const event of events) {
       for (const sub of subscriptionsByContract.get(event.contract_id) ?? []) {
-        if (!subscriptionsMatchEvent(sub.event_types, event.event_type)) {
+        if (!subscriptionsMatchEvent(sub, event)) {
           continue;
         }
 
@@ -886,6 +963,16 @@ export async function deliverWebhooks(
                 disableAfter,
               },
             );
+            sendOpsAlert({
+              severity: "warning",
+              title: "Webhook subscription auto-disabled",
+              details: {
+                subscriptionId: sub.id,
+                contractId: sub.contract_id,
+                consecutiveFailures: failure.consecutiveFailures,
+                disableAfter,
+              },
+            });
           }
         }
       }

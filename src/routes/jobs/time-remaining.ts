@@ -24,6 +24,7 @@ import {
   classifySimError,
 } from "./errors.js";
 import { formatError } from "../../utils/format-error.js";
+import { safeCacheSet } from "../../utils/cache.js";
 
 const router = Router();
 
@@ -90,7 +91,7 @@ router.get(
             if (!Number.isFinite(sec)) {
               throw new SimError(500, "Internal server error");
             }
-            timeRemainingCache.set(cacheKey, sec);
+            safeCacheSet(timeRemainingCache, cacheKey, sec);
             return sec;
           }
           throw new SimError(500, "Internal server error");

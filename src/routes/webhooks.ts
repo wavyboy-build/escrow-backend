@@ -83,6 +83,20 @@ function parseEventTypes(eventTypes: string): unknown[] {
   }
 }
 
+/**
+ * Parse a stored `filters_json` value for the API response (#1041). Malformed
+ * or absent values become null so a corrupt row never breaks the listing.
+ */
+function parseFilters(filtersJson: string | null | undefined): unknown {
+  if (!filtersJson) return null;
+  try {
+    const parsed: unknown = JSON.parse(filtersJson);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 router.get("/subscriptions", requireApiKey, (req, res) => {
   const contractId = req.query.contract_id;
   if (typeof contractId !== "string" || contractId.trim().length === 0) {
@@ -93,6 +107,7 @@ router.get("/subscriptions", requireApiKey, (req, res) => {
     id: subscription.id,
     webhook_url: maskWebhookUrlQuery(subscription.webhook_url),
     event_types: parseEventTypes(subscription.event_types),
+    filters: parseFilters(subscription.filters_json),
     created_at: subscription.created_at,
   }));
 
@@ -110,6 +125,7 @@ router.post("/subscribe", webhookLimiter, requireAdmin, (req, res) => {
     contract_id: req.body?.contract_id,
     webhook_url: req.body?.webhook_url,
     event_types: req.body?.event_types,
+    filters: req.body?.filters,
   }, req.id);
 
   if (!result.ok) {

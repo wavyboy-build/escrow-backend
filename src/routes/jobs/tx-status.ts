@@ -10,6 +10,7 @@ import {
 } from "./shared.js";
 import { classifySimError } from "./errors.js";
 import { txStatusCache } from "./caches.js";
+import { safeCacheSet } from "../../utils/cache.js";
 
 const router = Router();
 
@@ -96,7 +97,7 @@ router.get(
             : "Transaction failed on-chain";
       }
 
-      txStatusCache.set(key, payload);
+      safeCacheSet(txStatusCache, key, payload);
       sendSuccess(res, payload);
     } catch (err: unknown) {
       const raw = err instanceof Error ? err.message : String(err);

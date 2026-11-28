@@ -3,6 +3,7 @@ import helmet from "helmet";
 import jobRoutes from "./routes/jobs.js";
 import adminRoutes from "./routes/admin.js";
 import webhookRoutes from "./routes/webhooks.js";
+import notificationsRouter, { unsubscribeRouter } from "./routes/notifications.js";
 import tokenRoutes from "./routes/tokens.js";
 import statsRoutes from "./routes/stats.js";
 import clientErrorRoutes from "./routes/client-errors.js";
@@ -105,15 +106,20 @@ export function createApp(): express.Express {
   app.use("/api/v1/jobs", jobRoutes);
   app.use("/api/v1/admin", adminRoutes);
   app.use("/api/v1/webhooks", webhookRoutes);
+  app.use("/api/v1/notifications", notificationsRouter);
   app.use("/api/v1/tokens", tokenRoutes);
   app.use("/api/v1/stats", statsRoutes);
   app.use("/api/v1/disputes", disputeRoutes);
   app.use("/api/jobs", jobRoutes);
   app.use("/api/admin", adminRoutes);
   app.use("/api/webhooks", webhookRoutes);
+  app.use("/api/notifications", notificationsRouter);
   app.use("/api/tokens", tokenRoutes);
   app.use("/api/stats", statsRoutes);
   app.use("/api/disputes", disputeRoutes);
+
+  // One-click unsubscribe link is emitted at the app root (#1044).
+  app.use(unsubscribeRouter);
 
   // JSON 404 for unknown routes instead of Express's HTML page (#869).
   app.use((_req, res) => sendError(res, 404, "Not found"));

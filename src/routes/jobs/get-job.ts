@@ -34,6 +34,7 @@ import {
   classifySimError,
 } from "./errors.js";
 import { formatError } from "../../utils/format-error.js";
+import { safeCacheSet } from "../../utils/cache.js";
 
 const router = Router();
 
@@ -160,7 +161,7 @@ router.get(
               string,
               unknown
             >;
-            feePreviewCache.set(cacheKey, splitObj);
+            safeCacheSet(feePreviewCache, cacheKey, splitObj);
             return splitObj;
           }
 

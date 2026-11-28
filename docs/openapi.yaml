@@ -1578,3 +1578,84 @@ paths:
           description: Milestone has never been disputed
         '429':
           description: Rate limit exceeded
+
+  /api/notifications/email:
+    post:
+      summary: Subscribe an email address to per-contract notifications
+      description: >
+        Unauthenticated, double opt-in. Stores a pending subscription for the
+        contract and sends a confirmation email; no notifications are delivered
+        until the confirmation link is opened. Rate limited per IP and per email
+        address, with a cap on active/pending subscriptions per address. Disabled
+        (503) when SMTP_URL is unset (#1044).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - contract_id
+                - email
+              properties:
+                contract_id:
+                  type: string
+                email:
+                  type: string
+                  format: email
+                event_types:
+                  type: array
+                  items:
+                    type: string
+                    enum:
+                      - delivered
+                      - approved
+                      - disputed
+                      - auto_release_available
+      responses:
+        '200':
+          description: Confirmation email sent
+        '400':
+          description: Validation error
+        '429':
+          description: Rate limit or per-email subscription cap exceeded
+        '503':
+          description: Email notifications are not enabled
+
+  /api/notifications/email/confirm:
+    get:
+      summary: Confirm an email notification subscription
+      description: Completes the double opt-in using the token from the confirmation email.
+      parameters:
+        - name: token
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Subscription confirmed
+        '400':
+          description: Missing token, or invalid/expired token
+        '503':
+          description: Email notifications are not enabled
+
+  /unsubscribe:
+    get:
+      summary: One-click unsubscribe from email notifications
+      description: Deletes the email subscription identified by the unsubscribe token.
+      parameters:
+        - name: token
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Unsubscribed successfully
+        '400':
+          description: Missing token
+        '404':
+          description: Subscription not found
+        '503':
+          description: Email notifications are not enabled
